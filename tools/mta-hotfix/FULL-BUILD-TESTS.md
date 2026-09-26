@@ -16,8 +16,10 @@ c74a90e4606c8eba6c367ca0c0b95a9eb7fc658022e2e0bbc33d883b6816f299  wine-mta-hotfi
 ```
 
 The binary archive is approximately 121 MiB and the source archive 33 MiB.
-These identify the tested local artifacts; they are not download links or a
-claim that a GitHub binary release has been uploaded.
+These hashes identify the archives attached to the [experimental Win32
+preview release](https://github.com/Knogle/wine/releases/tag/wine-11.3-mta-hotfix-win32-r1).
+The release tag points to the compiled commit above, not the later
+branch commits that add packaging automation and this report.
 
 All installed Wine components came from this build. No DLLs from the hybrid
 runner, Microsoft runtimes, MTA files, GTA files, or prefixes were packaged.
@@ -29,7 +31,9 @@ future builds; the artifact source commit above remains unchanged.
 
 ## Build environment and limits
 
-- Dedicated Fedora 43 Toolbox, GCC and i686 MinGW GCC 15.2.1, 24 jobs.
+- Dedicated Fedora 43 Toolbox, native GCC 15.3.1 and i686 MinGW GCC 15.2.1,
+  24 jobs. These distinct versions are recorded in the packaged BUILD-INFO;
+  an earlier report incorrectly described both compilers as 15.2.1.
 - Recipe: `tools/mta-hotfix/build-runner.sh /absolute/new/output 24`.
 - `PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig`, with inherited
   `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH` unset.

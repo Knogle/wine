@@ -63,7 +63,10 @@ commit with any build you distribute. The expected outputs include a `runner/`
 directory, `wine-mta-hotfix-win32.tar.xz`, the matching
 `wine-mta-hotfix-source.tar.xz`, and `SHA256SUMS`. Build metadata is included in
 `runner/share/mta-hotfix/BUILD-INFO.txt`; distribute both archives together.
-This is a source-build workflow, not a link to an already tested binary release.
+For the separately tested prebuilt artifacts, see the [experimental Win32
+preview release](https://github.com/Knogle/wine/releases/tag/wine-11.3-mta-hotfix-win32-r1).
+Its release tag identifies the exact compiled commit, not the later
+documentation/packaging commits on this branch.
 
 The initially successful experiment used rebuilt core components in an
 existing Wine 11.3 runner, retaining its graphics/audio modules. A later complete
