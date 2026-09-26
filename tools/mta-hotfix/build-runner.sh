@@ -44,6 +44,35 @@ done
 install -m 755 "$source_dir/tools/mta-hotfix/wine-mta" "$runner/bin/wine-mta"
 mkdir -- "$runner/share/mta-hotfix"
 cp -- "$source_dir/"{COPYING.LIB,LICENSE,LICENSE.OLD,AUTHORS,HOTFIX-MTA.md} "$runner/share/mta-hotfix/"
+# Binary downloads need the bundled components' notices even when the matching
+# source archive is downloaded separately. Keep asset metadata intact, and read
+# every upstream notice from the recorded commit so the package stays traceable.
+notice_dir=$runner/share/mta-hotfix/third-party
+mkdir -- "$notice_dir"
+git -C "$source_dir" ls-tree -r --name-only -z "$source_commit" > "$output_dir/notice-tree.z"
+notice_paths=()
+while IFS= read -r -d '' notice_path; do
+    case $notice_path in
+        fonts/*.sfd) notice_paths+=("$notice_path"); continue ;;
+    esac
+    notice_name=${notice_path##*/}
+    case ${notice_name^^} in
+        AUTHORS|COPYING*|COPYRIGHT*|LICENSE*|LICENCE*|NOTICE*|CREDITS*)
+            notice_paths+=("$notice_path") ;;
+    esac
+done < "$output_dir/notice-tree.z"
+notice_status=0
+git -C "$source_dir" grep -z -l -i -e '<cc:license' "$source_commit" -- '*.svg' \
+    > "$output_dir/notice-svg.z" || notice_status=$?
+[[ $notice_status -le 1 ]] || die 'cannot read asset license metadata from source commit'
+while IFS= read -r -d '' notice_match; do
+    notice_paths+=("${notice_match#*:}")
+done < "$output_dir/notice-svg.z"
+[[ ${#notice_paths[@]} -gt 0 ]] || die 'source commit contains no license notices'
+git -C "$source_dir" --literal-pathspecs archive --format=tar "$source_commit" \
+    -- "${notice_paths[@]}" |
+    tar --extract --file=- --directory="$notice_dir" --no-same-owner
+install -m 644 "$source_dir/tools/mta-hotfix/ACKNOWLEDGEMENTS.txt" "$runner/share/mta-hotfix/"
 {
     printf 'Source commit: %s\nArchitecture: traditional win32 only\n' "$source_commit"
     printf 'Configure:'; printf ' %q' "${configure_args[@]}"; printf '\n'

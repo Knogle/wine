@@ -1,0 +1,17 @@
+Wine MTA hotfix: bundled-component acknowledgements
+
+This software is based in part on the work of the Independent JPEG Group.
+
+Wine incorporates components and assets with their own copyright notices and
+license terms. The third-party/ directory preserves upstream license, author,
+and credit files at their original source-relative paths. It also includes
+original font source files and SVG assets containing license metadata, so their
+embedded attribution is retained. These materials are copied unchanged from
+the source commit recorded in BUILD-INFO.txt; they are not a claim that every
+component uses the same license.
+
+The matching wine-mta-hotfix-source.tar.xz archive contains the complete Wine
+source tree for that commit, including file-level notices and build scripts.
+Distribute that source archive alongside the runner archive and SHA256SUMS.
+Keep the root Wine license files and all applicable component notices when
+redistributing. Host runtime libraries are not included in this runner.

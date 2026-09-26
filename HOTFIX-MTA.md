@@ -66,11 +66,13 @@ directory, `wine-mta-hotfix-win32.tar.xz`, the matching
 This is a source-build workflow, not a link to an already tested binary release.
 
 The initially successful experiment used rebuilt core components in an
-existing Wine 11.3 runner, retaining its graphics/audio modules. The full-source
-build helper is a reproducible packaging path, **not evidence that every
-resulting build has passed the original gameplay test**. Runtime dependencies
+existing Wine 11.3 runner, retaining its graphics/audio modules. A later complete
+source build was packaged and checked separately; see the [full-build test
+record](tools/mta-hotfix/FULL-BUILD-TESTS.md). This does **not** mean that every
+resulting build has passed the original gameplay test. Runtime dependencies
 still depend on the distribution and toolchain used; the archive is not a
-self-contained universal Linux runtime.
+self-contained universal Linux runtime. The packaging helper retains component
+notices and font/SVG attribution alongside Wine's root license files.
 
 ## Try it without changing your normal prefix
 
