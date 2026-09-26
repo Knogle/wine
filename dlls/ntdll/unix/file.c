@@ -4342,6 +4342,90 @@ static void remove_trailing_backslash( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *
     nt_name->Buffer[len - 1] = 0;
 }
 
+/* Resolve SystemRoot through its real object-manager link rather than a
+ * second hard-coded Windows directory.  Native applications use this alias
+ * for ordinary file opens, which the DOS-to-Unix path lookup cannot resolve.
+ * Keep using that lookup afterwards so file access and sharing checks stay
+ * unchanged.  The returned buffer belongs to the caller. */
+static NTSTATUS resolve_systemroot_path( const OBJECT_ATTRIBUTES *attr, UNICODE_STRING *resolved )
+{
+    static const WCHAR prefix[] = {'\\','S','y','s','t','e','m','R','o','o','t'};
+    UNICODE_STRING link_name, target;
+    OBJECT_ATTRIBUTES link_attr;
+    HANDLE link;
+    NTSTATUS status;
+    ULONG needed, suffix_len;
+    WCHAR empty;
+
+    resolved->Buffer = NULL;
+
+    /* This first prototype deliberately leaves WOW64, object-directory
+     * relative names and link-control flags on their existing paths until
+     * their Windows contracts have been measured.  0x1000 is OBJ_DONT_REPARSE;
+     * this Wine version does not yet expose that constant in its headers. */
+    if (is_wow64() || attr->RootDirectory || (attr->Attributes & (OBJ_OPENLINK | 0x1000)))
+        return STATUS_SUCCESS;
+
+    if (attr->ObjectName->Length < sizeof(prefix) ||
+        wcsnicmp( attr->ObjectName->Buffer, prefix, ARRAY_SIZE(prefix) ))
+        return STATUS_SUCCESS;
+
+    if (attr->ObjectName->Length % sizeof(WCHAR)) return STATUS_OBJECT_NAME_INVALID;
+    if (attr->ObjectName->Length > sizeof(prefix) &&
+        attr->ObjectName->Buffer[ARRAY_SIZE(prefix)] != '\\')
+        return STATUS_SUCCESS;
+
+    link_name.Buffer = attr->ObjectName->Buffer;
+    link_name.Length = link_name.MaximumLength = sizeof(prefix);
+    InitializeObjectAttributes( &link_attr, &link_name, attr->Attributes & OBJ_CASE_INSENSITIVE, 0, NULL );
+    suffix_len = attr->ObjectName->Length - sizeof(prefix);
+    if ((status = NtOpenSymbolicLinkObject( &link, SYMBOLIC_LINK_QUERY, &link_attr )))
+    {
+        /* A missing alias is an intermediate component when a suffix follows. */
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND && suffix_len) return STATUS_OBJECT_PATH_NOT_FOUND;
+        return status;
+    }
+
+    /* Query twice through the same handle: replacing the name cannot switch
+     * the object between the size query and the actual target query.  Reserve
+     * the suffix separately and check before narrowing to UNICODE_STRING. */
+    target.Buffer = &empty;
+    target.Length = 0;
+    target.MaximumLength = sizeof(empty);
+    status = NtQuerySymbolicLinkObject( link, &target, &needed );
+    if (status != STATUS_BUFFER_TOO_SMALL)
+    {
+        if (!status) status = STATUS_OBJECT_PATH_SYNTAX_BAD; /* empty link target */
+        goto done;
+    }
+    if (needed < sizeof(WCHAR) || needed % sizeof(WCHAR) || needed > USHRT_MAX - suffix_len)
+    {
+        status = STATUS_NAME_TOO_LONG;
+        goto done;
+    }
+    if (!(target.Buffer = malloc( needed + suffix_len )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    target.MaximumLength = needed;
+    if (!(status = NtQuerySymbolicLinkObject( link, &target, NULL )))
+    {
+        memcpy( target.Buffer + target.Length / sizeof(WCHAR),
+                attr->ObjectName->Buffer + ARRAY_SIZE(prefix), suffix_len );
+        target.Length += suffix_len;
+        target.MaximumLength = needed + suffix_len;
+        target.Buffer[target.Length / sizeof(WCHAR)] = 0;
+        *resolved = target;
+    }
+    else free( target.Buffer );
+
+done:
+    NtClose( link );
+    return status;
+}
+
+
 /***********************************************************************
  *           get_nt_and_unix_names
  *
@@ -4386,9 +4470,24 @@ NTSTATUS get_nt_and_unix_names( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nt_name
     }
     else
     {
+        UNICODE_STRING systemroot_name;
+
+        if ((status = resolve_systemroot_path( attr, &systemroot_name ))) return status;
+        if (systemroot_name.Buffer) attr->ObjectName = &systemroot_name;
 #ifndef _WIN64
         get_redirect( attr, nt_name );
 #endif
+        /* Redirection may allocate its own string.  Transfer the alias buffer
+         * only if it is still in use, so both paths retain a single owner. */
+        if (systemroot_name.Buffer)
+        {
+            if (attr->ObjectName == &systemroot_name)
+            {
+                *nt_name = systemroot_name;
+                attr->ObjectName = nt_name;
+            }
+            else free( systemroot_name.Buffer );
+        }
         status = nt_to_unix_file_name( attr, nt_name, unix_name_ret, disposition, open_reparse );
     }
 

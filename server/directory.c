@@ -381,6 +381,8 @@ void init_directories( struct fd *intl_fd )
     static const struct unicode_str dir_nls_str = {dir_nlsW, sizeof(dir_nlsW)};
 
     /* symlinks */
+    static const WCHAR link_systemrootW[] = {'S','y','s','t','e','m','R','o','o','t'};
+    static const WCHAR target_systemrootW[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s'};
     static const WCHAR link_dosdevW[] = {'D','o','s','D','e','v','i','c','e','s'};
     static const WCHAR link_globalrootW[] = {'G','L','O','B','A','L','R','O','O','T'};
     static const WCHAR link_globalW[] = {'G','l','o','b','a','l'};
@@ -396,6 +398,8 @@ void init_directories( struct fd *intl_fd )
         '\\','C','u','r','r','e','n','t','O','u','t'};
     static const WCHAR link_consoleW[]    = {'\\','D','e','v','i','c','e','\\','C','o','n','D','r','v',
         '\\','C','o','n','s','o','l','e'};
+    static const struct unicode_str link_systemroot_str = {link_systemrootW, sizeof(link_systemrootW)};
+    static const struct unicode_str target_systemroot_str = {target_systemrootW, sizeof(target_systemrootW)};
     static const struct unicode_str link_dosdev_str = {link_dosdevW, sizeof(link_dosdevW)};
     static const struct unicode_str link_globalroot_str = {link_globalrootW, sizeof(link_globalrootW)};
     static const struct unicode_str link_global_str = {link_globalW, sizeof(link_globalW)};
@@ -476,6 +480,12 @@ void init_directories( struct fd *intl_fd )
 
     for (i = 0; i < ARRAY_SIZE(types); i++)
         release_object( create_object_type( &dir_objtype->obj, i, OBJ_PERMANENT, NULL ));
+
+    /* SystemRoot is an NT namespace alias, not a process environment variable.
+     * Publish it before clients start so link queries and native file opens use
+     * the same Windows directory as ntdll and wineboot. */
+    release_object( create_symlink( &root_directory->obj, &link_systemroot_str,
+                                   OBJ_PERMANENT, &target_systemroot_str, NULL ));
 
     /* symlinks */
     release_object( create_obj_symlink( &root_directory->obj, &link_dosdev_str, OBJ_PERMANENT, &dir_global->obj, NULL ));
