@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+set -euo pipefail
+
+die() { printf 'wine-mta: %s\n' "$*" >&2; exit 1; }
+[[ $# -gt 0 ]] || die "usage: WINEPREFIX=/absolute/test-prefix $0 program.exe [arguments...]"
+[[ ${WINEPREFIX:-} = /* ]] || die 'set an explicit absolute WINEPREFIX; no default prefix is used'
+[[ ${WINEARCH:-win32} = win32 ]] || die 'only WINEARCH=win32 is supported'
+[[ (! -e $WINEPREFIX && ! -L $WINEPREFIX) || -d $WINEPREFIX ]] || die 'WINEPREFIX is not a directory'
+# Do not let an experimental 32-bit runner upgrade an unknown or 64-bit prefix.
+if [[ -f $WINEPREFIX/system.reg ]]; then
+    grep -qx '#arch=win32' "$WINEPREFIX/system.reg" || die 'existing prefix is not marked win32'
+elif [[ -d $WINEPREFIX ]]; then
+    prefix_entry=$(find "$WINEPREFIX/." -mindepth 1 -maxdepth 1 -print -quit) || die 'cannot inspect prefix directory'
+    [[ -z $prefix_entry ]] || die 'existing nonempty directory is not a recognized Wine prefix'
+fi
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+runner_bin=$(dirname -- "$script_path")
+[[ -x $runner_bin/wine && -x $runner_bin/wineserver ]] || die 'install this launcher beside the runner wine and wineserver'
+export WINEARCH=win32
+export WINELOADER="$runner_bin/wine"
+export WINESERVER="$runner_bin/wineserver"
+export PATH="$runner_bin:$PATH"
+exec "$runner_bin/wine" "$@"

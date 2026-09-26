@@ -1,3 +1,15 @@
+## MTA compatibility hotfix — Wine 11.3
+
+This custom branch contains experimental certificate SHA-256 and native
+`\\SystemRoot` file-access fixes for MTA: San Andreas. See
+[HOTFIX-MTA.md](HOTFIX-MTA.md) for the build helper, isolated Win32 usage,
+reproducer probes, test evidence and known limitations.
+
+This is **not a Proton release or a WOW64 fix**. The successful multiplayer
+test used the documented mixed prototype runner; a newly source-built runner
+requires its own runtime validation. No game binaries or Wine prefixes are
+included.
+
 ## INTRODUCTION
 
 Wine is a program which allows running Microsoft Windows programs
