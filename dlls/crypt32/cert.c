@@ -557,6 +557,12 @@ static BOOL CertContext_GetProperty(cert_t *cert, DWORD dwPropId,
              cert->ctx.pbCertEncoded, cert->ctx.cbCertEncoded, pvData,
              pcbData);
             break;
+        case CERT_SHA256_HASH_PROP_ID:
+            /* Windows computes uncached certificate hash properties on demand. */
+            ret = CertContext_GetHashProp(cert, dwPropId, CALG_SHA_256,
+             cert->ctx.pbCertEncoded, cert->ctx.cbCertEncoded, pvData,
+             pcbData);
+            break;
         case CERT_MD5_HASH_PROP_ID:
             ret = CertContext_GetHashProp(cert, dwPropId, CALG_MD5,
              cert->ctx.pbCertEncoded, cert->ctx.cbCertEncoded, pvData,
@@ -754,6 +760,7 @@ static BOOL CertContext_SetProperty(cert_t *cert, DWORD dwPropId,
         case CERT_PUBKEY_ALG_PARA_PROP_ID:
         case CERT_PVK_FILE_PROP_ID:
         case CERT_SIGNATURE_HASH_PROP_ID:
+        case CERT_SHA256_HASH_PROP_ID:
         case CERT_ISSUER_PUBLIC_KEY_MD5_HASH_PROP_ID:
         case CERT_SUBJECT_NAME_MD5_HASH_PROP_ID:
         case CERT_EXTENDED_ERROR_INFO_PROP_ID:
