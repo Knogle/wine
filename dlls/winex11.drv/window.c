@@ -22,6 +22,7 @@
 
 #include "config.h"
 
+#include <poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -848,12 +849,21 @@ static void set_size_hints( struct x11drv_win_data *data, DWORD style )
     XFree( size_hints );
 }
 
+struct is_unmap_notify_param
+{
+    struct x11drv_win_data *data;
+    BOOL found;
+};
+
 static Bool is_unmap_notify( Display *display, XEvent *event, XPointer arg )
 {
-    struct x11drv_win_data *data = (struct x11drv_win_data *)arg;
-    return event->xany.serial >= data->unmapnotify_serial &&
-           event->xany.window == data->whole_window &&
-           event->type == UnmapNotify;
+    struct is_unmap_notify_param *p = (struct is_unmap_notify_param *)arg;
+
+    if (!p->found)
+        p->found = event->type == UnmapNotify &&
+                   event->xany.serial >= p->data->unmapnotify_serial &&
+                   event->xany.window == p->data->whole_window;
+    return False;
 }
 
 /***********************************************************************
@@ -941,18 +951,33 @@ static void set_mwm_hints( struct x11drv_win_data *data, DWORD style, DWORD ex_s
                      x11drv_atom(_MOTIF_WM_HINTS), 32, PropModeReplace,
                      (unsigned char*)&mwm_hints, sizeof(mwm_hints)/sizeof(long) );
 
-    if (enable_mutter_workaround)
+    if (enable_mutter_workaround && mapped)
     {
+        DWORD end = GetTickCount() + 100;
+        struct is_unmap_notify_param p;
+        struct pollfd pfd;
         XEvent event;
+        int timeout;
 
         /* workaround for mutter gitlab bug #649, wait for the map notify
          * event each time the decorations are modified before modifying
          * them again.
          */
-        if (mapped)
+        p.data = data;
+        p.found = FALSE;
+        TRACE("workaround mutter bug #649, waiting for UnmapNotify\n");
+        pfd.fd = ConnectionNumber(data->display);
+        pfd.events = POLLIN;
+        for (;;)
         {
-            TRACE("workaround mutter bug #649, waiting for UnmapNotify\n");
-            XPeekIfEvent( data->display, &event, is_unmap_notify, (XPointer)data );
+            XCheckIfEvent( data->display, &event, is_unmap_notify, (XPointer)&p );
+            if (p.found) break;
+            timeout = end - GetTickCount();
+            if (timeout <= 0 || poll( &pfd, 1, timeout ) != 1)
+            {
+                WARN( "window %p/%lx unmap_notify wait timed out.\n", data->hwnd, data->whole_window );
+                break;
+            }
         }
     }
 
@@ -1173,6 +1198,45 @@ void update_user_time( Time time )
     XUnlockDisplay( gdi_display );
 }
 
+/* Update _NET_WM_FULLSCREEN_MONITORS when _NET_WM_STATE_FULLSCREEN is set to support fullscreen
+ * windows spanning multiple monitors */
+static void update_net_wm_fullscreen_monitors( struct x11drv_win_data *data )
+{
+    long monitors[4];
+    XEvent xev;
+
+    if (!(data->net_wm_state & (1 << NET_WM_STATE_FULLSCREEN)) || is_virtual_desktop())
+        return;
+
+    xinerama_get_fullscreen_monitors( &data->whole_rect, monitors );
+    if (monitors[0] == -1 || monitors[1] == -1 || monitors[2] == -1 || monitors[3] == -1)
+    {
+        ERR("Failed to get xinerama fullscreen monitor indices.\n");
+        return;
+    }
+
+    if (!data->mapped)
+        XChangeProperty( data->display, data->whole_window, x11drv_atom(_NET_WM_FULLSCREEN_MONITORS),
+                         XA_CARDINAL, 32, PropModeReplace, (unsigned char *)monitors, 4 );
+    else
+    {
+        xev.xclient.type = ClientMessage;
+        xev.xclient.window = data->whole_window;
+        xev.xclient.message_type = x11drv_atom(_NET_WM_FULLSCREEN_MONITORS);
+        xev.xclient.serial = 0;
+        xev.xclient.display = data->display;
+        xev.xclient.send_event = True;
+        xev.xclient.format = 32;
+        xev.xclient.data.l[0] = monitors[0];
+        xev.xclient.data.l[1] = monitors[1];
+        xev.xclient.data.l[2] = monitors[2];
+        xev.xclient.data.l[3] = monitors[3];
+        xev.xclient.data.l[4] = 1;
+        XSendEvent( data->display, root_window, False,
+                    SubstructureRedirectMask | SubstructureNotifyMask, &xev );
+    }
+}
+
 /***********************************************************************
  *     update_net_wm_states
  */
@@ -1224,7 +1288,8 @@ void update_net_wm_states( struct x11drv_win_data *data )
         new_state |= (1 << NET_WM_STATE_ABOVE);
     if (!data->add_taskbar)
     {
-        if (data->skip_taskbar || (ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)))
+        if (data->skip_taskbar || (ex_style & WS_EX_NOACTIVATE)
+            || (ex_style & WS_EX_TOOLWINDOW && !(ex_style & WS_EX_APPWINDOW)))
             new_state |= (1 << NET_WM_STATE_SKIP_TASKBAR) | (1 << NET_WM_STATE_SKIP_PAGER);
         else if (!(ex_style & WS_EX_APPWINDOW) && GetWindow( data->hwnd, GW_OWNER ))
             new_state |= (1 << NET_WM_STATE_SKIP_TASKBAR);
@@ -1282,7 +1347,7 @@ void update_net_wm_states( struct x11drv_win_data *data )
         }
     }
     data->net_wm_state = new_state;
-
+    update_net_wm_fullscreen_monitors( data );
     XChangeProperty( data->display, data->whole_window, x11drv_atom(_NET_WM_BYPASS_COMPOSITOR), XA_CARDINAL,
                      32, PropModeReplace, (unsigned char *)&net_wm_bypass_compositor, 1 );
 }
@@ -1380,6 +1445,7 @@ static void map_window( HWND hwnd, DWORD new_style )
 
         data->mapped = TRUE;
         data->iconic = (new_style & WS_MINIMIZE) != 0;
+        update_net_wm_fullscreen_monitors( data );
     }
     release_win_data( data );
 }

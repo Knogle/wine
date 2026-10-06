@@ -591,11 +591,11 @@ static const WCHAR *hack_append_command_line( const WCHAR *cmd )
     }
     options[] =
     {
-        {L"UplayWebCore.exe", L" --use-gl=swiftshader"},
+        {L"UplayWebCore.exe", L" --use-angle=gl"},
         {L"Paradox Launcher.exe", L" --use-gl=swiftshader --in-process-gpu"},
         {L"Montaro\\nw.exe", L" --use-gl=swiftshader"},
         {L"EOSOverlayRenderer-Win64-Shipping.exe", L" --use-gl=swiftshader --in-process-gpu"},
-        {L"EpicOnlineServicesUIHelper", L" --use-gl=swiftshader --in-process-gpu"},
+        {L"EpicOnlineServicesUIHelper", L" --use-gl=desktop"},
     };
     unsigned int i;
 
@@ -1828,6 +1828,37 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetEnvironmentVariableW( LPCWSTR name, LPCWSTR val
         SetLastError( ERROR_ENVVAR_NOT_FOUND );
         return FALSE;
     }
+
+    if (name && !lstrcmpW( name, L"QT_OPENGL" ) && value && !lstrcmpW( value, L"angle" ))
+    {
+        static const WCHAR *names[] =
+        {
+            L"\\EADesktop.exe",
+            L"\\Link2EA.exe",
+            L"\\EAConnect_microsoft.exe",
+            L"\\EALaunchHelper.exe",
+            L"\\EACrashReporter.exe",
+            L"EA Desktop\\ErrorReporter.exe",
+        };
+        unsigned int i, len;
+        WCHAR module[256];
+        DWORD size;
+
+        if ((size = GetModuleFileNameW( NULL, module, ARRAY_SIZE(module) )) && size < ARRAY_SIZE(module))
+        {
+            for (i = 0; i < ARRAY_SIZE(names); ++i)
+            {
+                len = lstrlenW(names[i]);
+                if (size > len && !memcmp( module + size - len, names[i], len * sizeof(*module) ))
+                {
+                    value = L"desktop";
+                    FIXME( "HACK: setting QT_OPENGL=desktop.\n" );
+                    break;
+                }
+            }
+        }
+    }
+
 
     RtlInitUnicodeString( &us_name, name );
     if (value)

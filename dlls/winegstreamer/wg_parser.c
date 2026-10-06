@@ -37,6 +37,9 @@
 
 #include <gst/gl/gl.h>
 
+
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "winternl.h"
 #include "dshow.h"
 
@@ -99,6 +102,7 @@ struct wg_parser
     bool use_opengl;
 
     GstContext *context;
+    bool using_qtdemux;
 };
 
 struct wg_parser_stream
@@ -114,10 +118,12 @@ struct wg_parser_stream
     GstBuffer *buffer;
     GstMapInfo map_info;
 
-    bool flushing, eos, enabled, has_caps;
+    bool flushing, eos, enabled, has_caps, has_tags;
 
     uint64_t duration;
-    gchar *language_code;
+    gchar *tags[WG_PARSER_TAG_MAX];
+    gchar *stream_id;
+    int seq_id;
 };
 
 static NTSTATUS wg_parser_get_stream_count(void *args)
@@ -364,12 +370,19 @@ static NTSTATUS wg_parser_stream_get_duration(void *args)
     return S_OK;
 }
 
-static NTSTATUS wg_parser_stream_get_language(void *args)
+static NTSTATUS wg_parser_stream_get_tag(void *args)
 {
-    struct wg_parser_stream_get_language_params *params = args;
-    if (params->stream->language_code)
-        lstrcpynA(params->buffer, params->stream->language_code, params->size);
-    return params->stream->language_code ? S_OK : E_FAIL;
+    struct wg_parser_stream_get_tag_params *params = args;
+    uint32_t len;
+
+    if (params->tag >= WG_PARSER_TAG_MAX)
+        return STATUS_INVALID_PARAMETER;
+    if (!params->stream->tags[params->tag])
+        return STATUS_NOT_FOUND;
+    if ((len = strlen(params->stream->tags[params->tag]) + 1) > params->size)
+        return STATUS_BUFFER_TOO_SMALL;
+    memcpy(params->buffer, params->stream->tags[params->tag], len);
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS wg_parser_stream_seek(void *args)
@@ -427,6 +440,19 @@ static NTSTATUS wg_parser_stream_notify_qos(void *args)
     return S_OK;
 }
 
+gboolean caps_detect_h264(GstCapsFeatures *features, GstStructure *structure, gpointer user_data)
+{
+    const char *cap_name = gst_structure_get_name(structure);
+
+    if (!strcmp(cap_name, "video/x-h264"))
+    {
+        touch_h264_used_tag();
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static GstAutoplugSelectResult autoplug_select_cb(GstElement *bin, GstPad *pad,
         GstCaps *caps, GstElementFactory *fact, gpointer user)
 {
@@ -434,6 +460,8 @@ static GstAutoplugSelectResult autoplug_select_cb(GstElement *bin, GstPad *pad,
     struct wg_parser *parser = user;
 
     GST_INFO("Using \"%s\".", name);
+
+    gst_caps_foreach(caps, caps_detect_h264, NULL);
 
     if (parser->error)
         return GST_AUTOPLUG_SELECT_SKIP;
@@ -447,6 +475,8 @@ static GstAutoplugSelectResult autoplug_select_cb(GstElement *bin, GstPad *pad,
         GST_WARNING("Disabled video acceleration since it breaks in wine.");
         return GST_AUTOPLUG_SELECT_SKIP;
     }
+    if (!strcmp(name, "QuickTime demuxer"))
+        parser->using_qtdemux = true;
     return GST_AUTOPLUG_SELECT_TRY;
 }
 
@@ -478,11 +508,37 @@ static GValueArray *autoplug_sort_cb(GstElement *bin, GstPad *pad,
     return ret;
 }
 
+static int streams_compare(const void *comp1, const void *comp2)
+{
+    const struct wg_parser_stream * const *stream1 = comp1;
+    const struct wg_parser_stream * const *stream2 = comp2;
+    const char *s1, *s2;
+    int ret;
+
+    s1 = (*stream1)->stream_id ? strchr((*stream1)->stream_id, '/') : NULL;
+    s2 = (*stream2)->stream_id ? strchr((*stream2)->stream_id, '/') : NULL;
+
+    if (!s1 || !s2)
+    {
+        if (!s1 && !s2)
+            return (*stream1)->seq_id - (*stream2)->seq_id;
+        if (!s1)
+            return -1;
+        return 1;
+    }
+    if ((ret = strcmp(s1, s2)))
+        return ret;
+    return (*stream1)->seq_id - (*stream2)->seq_id;
+}
+
 static void no_more_pads_cb(GstElement *element, gpointer user)
 {
     struct wg_parser *parser = user;
 
     GST_DEBUG("parser %p.", parser);
+
+    if (parser->using_qtdemux)
+        qsort(parser->streams, parser->stream_count, sizeof(*parser->streams), streams_compare);
 
     pthread_mutex_lock(&parser->mutex);
     parser->no_more_pads = true;
@@ -580,6 +636,13 @@ static gboolean sink_event_cb(GstPad *pad, GstObject *parent, GstEvent *event)
             break;
         }
 
+        case GST_EVENT_TAG:
+            pthread_mutex_lock(&parser->mutex);
+            stream->has_tags = true;
+            pthread_cond_signal(&parser->init_cond);
+            pthread_mutex_unlock(&parser->mutex);
+            break;
+
         default:
             GST_WARNING("Ignoring \"%s\" event.", GST_EVENT_TYPE_NAME(event));
     }
@@ -595,6 +658,13 @@ static GstFlowReturn sink_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *bu
     GST_LOG("stream %p, buffer %p.", stream, buffer);
 
     pthread_mutex_lock(&parser->mutex);
+
+    if (!stream->has_tags)
+    {
+        /* If we receieved a buffer waiting for tags in wg_parser_connect() does not make sense anymore. */
+        stream->has_tags = TRUE;
+        pthread_cond_signal(&parser->init_cond);
+    }
 
     /* Allow this buffer to be flushed by GStreamer. We are effectively
      * implementing a queue object here. */
@@ -729,7 +799,7 @@ GstElement *create_element(const char *name, const char *plugin_set)
     return element;
 }
 
-static struct wg_parser_stream *create_stream(struct wg_parser *parser)
+static struct wg_parser_stream *create_stream(struct wg_parser *parser, gchar *id)
 {
     struct wg_parser_stream *stream, **new_array;
     char pad_name[19];
@@ -743,6 +813,8 @@ static struct wg_parser_stream *create_stream(struct wg_parser *parser)
 
     gst_segment_init(&stream->segment, GST_FORMAT_UNDEFINED);
 
+    stream->stream_id = id;
+    stream->seq_id = parser->stream_count;
     stream->parser = parser;
     stream->current_format.major_type = WG_MAJOR_TYPE_UNKNOWN;
     pthread_cond_init(&stream->event_cond, NULL);
@@ -761,6 +833,8 @@ static struct wg_parser_stream *create_stream(struct wg_parser *parser)
 
 static void free_stream(struct wg_parser_stream *stream)
 {
+    unsigned int i;
+
     if (stream->their_src)
     {
         if (stream->post_sink)
@@ -776,8 +850,14 @@ static void free_stream(struct wg_parser_stream *stream)
     pthread_cond_destroy(&stream->event_cond);
     pthread_cond_destroy(&stream->event_empty_cond);
 
-    if (stream->language_code)
-        g_free(stream->language_code);
+    for (i = 0; i < ARRAY_SIZE(stream->tags); ++i)
+    {
+        if (stream->tags[i])
+            g_free(stream->tags[i]);
+    }
+
+    if (stream->stream_id)
+        g_free(stream->stream_id);
 
     free(stream);
 }
@@ -799,7 +879,7 @@ static void pad_added_cb(GstElement *element, GstPad *pad, gpointer user)
     caps = gst_pad_query_caps(pad, NULL);
     name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
 
-    if (!(stream = create_stream(parser)))
+    if (!(stream = create_stream(parser, gst_pad_get_stream_id(pad))))
         goto out;
 
     if (!strcmp(name, "video/x-raw") && parser->use_opengl)
@@ -1303,20 +1383,50 @@ static gboolean src_event_cb(GstPad *pad, GstObject *parent, GstEvent *event)
     return ret;
 }
 
-static gchar *query_language(GstPad *pad)
+static void query_tags(struct wg_parser_stream *stream)
 {
+    const gchar *struct_name;
     GstTagList *tag_list;
     GstEvent *tag_event;
-    gchar *ret = NULL;
+    GstMapInfo map_info;
+    guint i, tag_count;
+    const GValue *val;
+    GstSample *sample;
+    GstBuffer *buf;
+    gsize size;
 
-    if ((tag_event = gst_pad_get_sticky_event(pad, GST_EVENT_TAG, 0)))
+    if (!(tag_event = gst_pad_get_sticky_event(stream->their_src, GST_EVENT_TAG, 0)))
+        return;
+
+    gst_event_parse_tag(tag_event, &tag_list);
+    gst_tag_list_get_string(tag_list, "language-code", &stream->tags[WG_PARSER_TAG_LANGUAGE]);
+
+    /* Extract stream name from Quick Time demuxer private tag where it puts unrecognized chunks. */
+    tag_count = gst_tag_list_get_tag_size(tag_list, "private-qt-tag");
+    for (i = 0; i < tag_count; ++i)
     {
-        gst_event_parse_tag(tag_event, &tag_list);
-        gst_tag_list_get_string(tag_list, "language-code", &ret);
-        gst_event_unref(tag_event);
+        if (!(val = gst_tag_list_get_value_index(tag_list, "private-qt-tag", i)))
+            continue;
+        if (!GST_VALUE_HOLDS_SAMPLE(val) || !(sample = gst_value_get_sample(val)))
+            continue;
+        struct_name = gst_structure_get_name(gst_sample_get_info(sample));
+        if (!struct_name || strcmp(struct_name, "application/x-gst-qt-name-tag"))
+            continue;
+        if (!(buf = gst_sample_get_buffer(sample)))
+            continue;
+        if ((size = gst_buffer_get_size(buf)) < 8)
+            continue;
+        if (!gst_buffer_map(buf, &map_info, GST_MAP_READ))
+            continue;
+        size -= 8;
+        if ((stream->tags[WG_PARSER_TAG_NAME] = g_malloc(size + 1)))
+        {
+            memcpy(stream->tags[WG_PARSER_TAG_NAME], map_info.data + 8, size);
+            stream->tags[WG_PARSER_TAG_NAME][size] = 0;
+        }
+        gst_buffer_unmap(buf, &map_info);
     }
-
-    return ret;
+    gst_event_unref(tag_event);
 }
 
 static NTSTATUS wg_parser_connect(void *args)
@@ -1399,7 +1509,7 @@ static NTSTATUS wg_parser_connect(void *args)
         struct wg_parser_stream *stream = parser->streams[i];
         gint64 duration;
 
-        while (!stream->has_caps && !parser->error)
+        while ((!stream->has_caps || !stream->has_tags) && !parser->error)
             pthread_cond_wait(&parser->init_cond, &parser->mutex);
 
         /* GStreamer doesn't actually provide any guarantees about when duration
@@ -1463,14 +1573,14 @@ static NTSTATUS wg_parser_connect(void *args)
             }
         }
 
+        query_tags(stream);
+
         /* Now that we're fully initialized, enable the stream so that further
          * samples get queued instead of being discarded. We don't actually need
          * the samples (in particular, the frontend should seek before
          * attempting to read anything), but we don't want to waste CPU time
          * trying to decode them. */
         stream->enabled = true;
-
-        stream->language_code = query_language(stream->their_src);
     }
 
     pthread_mutex_unlock(&parser->mutex);
@@ -1660,7 +1770,7 @@ static BOOL mpeg_audio_parser_init_gst(struct wg_parser *parser)
         return FALSE;
     }
 
-    if (!(stream = create_stream(parser)))
+    if (!(stream = create_stream(parser, NULL)))
         return FALSE;
 
     gst_object_ref(stream->their_src = gst_element_get_static_pad(element, "src"));
@@ -1694,7 +1804,7 @@ static BOOL wave_parser_init_gst(struct wg_parser *parser)
         return FALSE;
     }
 
-    if (!(stream = create_stream(parser)))
+    if (!(stream = create_stream(parser, NULL)))
         return FALSE;
 
     stream->their_src = gst_element_get_static_pad(element, "src");
@@ -1867,7 +1977,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     X(wg_parser_stream_notify_qos),
 
     X(wg_parser_stream_get_duration),
-    X(wg_parser_stream_get_language),
+    X(wg_parser_stream_get_tag),
     X(wg_parser_stream_seek),
 
     X(wg_transform_create),
